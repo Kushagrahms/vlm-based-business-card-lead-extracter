@@ -1,24 +1,18 @@
 import json
 import re
+import os
 from typing import List,Optional
 
-import torch
 from PIL import Image
-from transformers import (Qwen3VLForConditionalGeneration,AutoProcessor,)
-
-MODEL_ID ="Qwen/Qwen3-VL-2B-Instruct"
+from gradio_client import Client, handle_file
 
 # ============================================================
-# LOAD MODEL ONCE
+# Online model connection
 # ============================================================
+QWEN_SPACE = os.getenv(
+    "QWEN_SPACE","YOUR_HUGGINGFACE_USERNAME/YOUR_SPACE_NAME"
+)
 
-print("Loading model...")
-
-model = Qwen3VLForConditionalGeneration.from_pretrained(MODEL_ID,
-                                                        torch_dtype = torch.float16,
-                                                        device_map="auto",)
-processor = AutoProcessor.from_pretrained(MODEL_ID)
-print("Qwen3-VL model loaded successfully")
 
 # ============================================================
 # EXTRACTION PROMPT
@@ -103,40 +97,21 @@ def extract_lead(image:Image.Image)->Optional[dict]:
     Extract structured lead information from one business-card image.
     """
 
-    messages = [[
-        {
-            "role":"user",
-            "content":[{ 
-                "type":"image",
-                "image":image,
-            },
-            {
-                "type":"text",
-                "text":EXTRACTION_PROMPT,
-            },
-            ],
-        }
-    ]]
+    client = Client(QWEN_SPACE)
+    result = client.predict(
+        image= handle_file(image),
+        prompt = EXTRACTION_PROMPT,
+        api_name = "/predict",
+    )
 
-    text = processor.apply_chat_template(messages[0],tokenize=False,add_generation_prompt=True)
-    inputs = processor(
-        text=[text],
-        images=[image],
-        padding=True,
-        return_tensors="pt",
-    ).to(model.device)
+    if  isinstance(result,tuple):
+        result = result[0]
+    if isinstance(result,dict):
+        return result 
+    if isinstance(result,str):
+        return parse_model_output(result) 
 
-    with torch.no_grad():
-        outputs=  model.generate(**inputs,max_new_tokens=200,)
-
-    input_len = inputs["input_ids"].shape[1]
-    generated = outputs[:,input_len:]
-    decoded = processor.batch_decode(generated,skip_special_tokens=True,)
-
-    if not decoded:
-        return None
-    
-    return parse_model_output(decoded[0])
+    return None
 
 # ============================================================
 # BATCH EXTRACTION
@@ -150,45 +125,13 @@ def extract_leads_batch(images:List[Image.Image],batch_size:int=5,)->List[Option
     Images are processed in batches to avoid excessive GPU memory usage.
     """
     results = []
-    for i in range(0,len(images),batch_size):
-        batch = images[i:i+batch_size]
+    for image in images:
+        try:
+            result.extract_lead(image)
+        except Exception as e:
+            print(f"Qwen extraction failed: {e}")
+            result = None
 
-        messages=[]
-        for image in batch:
-            messages.append([
-                {
-                    "role":"user",
-                    "content":[{
-                        "type":"image",
-                        "image":image,
-                    },
-                    {
-                        "type":"text",
-                        "text":EXTRACTION_PROMPT,
-                    },],
-                }
-            ]) 
+        results.append(result)
 
-        texts = [ processor.apply_chat_template(message,tokenize=False,add_generation_prompt=True)
-                 for message in messages ]
-        inputs = processor(
-            text=texts,
-            images=batch,
-            padding=True,
-            return_tensors="pt",
-            ).to(model.device)
-
-        with torch.no_grad():
-            outputs = model.generate(**inputs,max_new_tokens=200,)
-
-            input_len = inputs["input_ids"].shape[1]
-
-            generated = outputs[:,input_len:]
-            decoded = processor.batch_decode(generated,skip_special_tokens=True,)
-
-            for text in decoded:
-                result = parse_model_output(text)
-
-                results.append(result)
-    return results
-
+    return results   
