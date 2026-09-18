@@ -50,6 +50,11 @@ async def extract_leads(files:Annotated[list[UploadFile], File(...)]):
     leads=[]
     try:
         for index, result in enumerate(results):
+            # If VLM extraction failed for this image,
+            # don't crash the entire batch.
+            if result is None:
+                continue
+
             lead = Lead(
                 first_name=result.get("first_name",""),
                 last_name=result.get("last_name",""),

@@ -1,137 +1,158 @@
-import json
-import re
 import os
-from typing import List,Optional
+from io import BytesIO
+from typing import List, Optional
 
+import requests
 from PIL import Image
-from gradio_client import Client, handle_file
-
-# ============================================================
-# Online model connection
-# ============================================================
-QWEN_SPACE = os.getenv(
-    "QWEN_SPACE","YOUR_HUGGINGFACE_USERNAME/YOUR_SPACE_NAME"
-)
+from dotenv import load_dotenv
 
 
 # ============================================================
-# EXTRACTION PROMPT
+# Load environment variables
 # ============================================================
 
-EXTRACTION_PROMPT = """
-Extract all business card information visible in the image.
+load_dotenv()
 
-Return ONLY a valid JSON object with exactly these fields:
+KAGGLE_VLM_URL = os.getenv("KAGGLE_VLM_URL")
 
-{
-  "first_name": "",
-  "last_name": "",
-  "job_title": "",
-  "company": "",
-  "location": "",
-  "phone": "",
-  "email": ""
-}
-
-IMPORTANT ACCURACY RULES:
-
-1. NAME:
-- Identify the person's actual name.
-- Do not use the company name as the person's name.
-
-2. JOB TITLE:
-- Extract the person's actual position/job title.
-- Do not use the company name as the job title.
-
-3. COMPANY:
-- Extract the actual organization/company name.
-
-4. LOCATION:
-- Carefully read the address EXACTLY as visible.
-- Preserve street numbers, street names, city, state, ZIP/postal code.
-- Do NOT guess, correct, or invent an address.
-- Do NOT replace unclear characters with a guessed value.
-- Copy what is actually visible.
-
-5. PHONE:
-- Carefully read EVERY digit.
-- Preserve the phone number exactly as visible.
-- Do NOT invent or correct digits.
-- If multiple phone numbers exist, separate them with ", ".
-- If the same number appears more than once, include it only once.
-
-6. EMAIL:
-- Extract only actual email addresses containing @.
-- Do not put website URLs in email.
-
-7. MISSING INFORMATION:
-- Use "" if the information is not visible.
-
-Return ONLY the JSON object.
-"""
-
-
-# ============================================================
-# JSON CLEANING
-# ============================================================
-
-def parse_model_output(text:str)->Optional[dict]:
-    """
-    Convert Qwen's generated text into a Python dictionary.
-    """
-    try:
-        text = text.strip()
-         # Removing markdown JSON fences if the model adds them
-        text = re.sub(r"```json\s*", "", text)
-        text = re.sub(r"```\s*", "", text)
-
-        return json.loads(text)
-    except (json.DecodeError, TypeError):
-        return None
-# ============================================================
-# SINGLE IMAGE EXTRACTION
-# ============================================================
-
-def extract_lead(image:Image.Image)->Optional[dict]:
-    """
-    Extract structured lead information from one business-card image.
-    """
-
-    client = Client(QWEN_SPACE)
-    result = client.predict(
-        image= handle_file(image),
-        prompt = EXTRACTION_PROMPT,
-        api_name = "/predict",
+if not KAGGLE_VLM_URL:
+    raise RuntimeError(
+        "KAGGLE_VLM_URL environment variable is not set."
     )
 
-    if  isinstance(result,tuple):
-        result = result[0]
-    if isinstance(result,dict):
-        return result 
-    if isinstance(result,str):
-        return parse_model_output(result) 
-
-    return None
 
 # ============================================================
-# BATCH EXTRACTION
+# Normalize Kaggle response
 # ============================================================
 
-def extract_leads_batch(images:List[Image.Image],batch_size:int=5,)->List[Optional[dict]]:
+def normalize_result(data: dict) -> dict:
+    return {
+        "first_name": data.get("first_name", ""),
+        "last_name": data.get("last_name", ""),
+        "job_title": data.get(
+            "position",
+            data.get("job_title", "")
+        ),
+        "company": data.get("company", ""),
+        "location": data.get("location", ""),
+        "phone_number": data.get(
+            "phone_number",
+            data.get("phone", "")
+        ),
+        "email": data.get(
+            "email_address",
+            data.get("email", "")
+        ),
+    }
 
-    """
-    Extract leads from multiple business-card images.
 
-    Images are processed in batches to avoid excessive GPU memory usage.
-    """
+# ============================================================
+# Extract one business card
+# ============================================================
+
+def extract_lead(image: Image.Image) -> Optional[dict]:
+
+    try:
+
+        # ----------------------------------------------------
+        # Convert PIL image to JPEG bytes
+        # ----------------------------------------------------
+
+        buffer = BytesIO()
+
+        image.convert("RGB").save(
+            buffer,
+            format="JPEG",
+            quality=95
+        )
+
+        image_bytes = buffer.getvalue()
+
+        # ----------------------------------------------------
+        # Prepare multipart upload
+        # ----------------------------------------------------
+
+        files = {
+            "file": (
+                "business_card.jpg",
+                image_bytes,
+                "image/jpeg"
+            )
+        }
+
+        # ----------------------------------------------------
+        # Send image to Kaggle
+        # ----------------------------------------------------
+
+        print(f"Sending image to Kaggle: {KAGGLE_VLM_URL}")
+
+        response = requests.post(
+            KAGGLE_VLM_URL,
+            files=files,
+            timeout=180
+        )
+
+        print(f"Kaggle response status: {response.status_code}")
+
+        response.raise_for_status()
+
+        # ----------------------------------------------------
+        # Parse response
+        # ----------------------------------------------------
+
+        result = response.json()
+
+        print("Kaggle response:", result)
+
+        if not result.get("success", False):
+            raise RuntimeError(
+                result.get(
+                    "error",
+                    "Kaggle VLM extraction failed"
+                )
+            )
+
+        data = result.get("data")
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                "Invalid data returned from Kaggle VLM API"
+            )
+
+        # ----------------------------------------------------
+        # Normalize field names
+        # ----------------------------------------------------
+
+        return normalize_result(data)
+
+    except requests.exceptions.Timeout:
+        print("Kaggle VLM request timed out")
+        return None
+
+    except requests.exceptions.RequestException as e:
+        print(f"Kaggle VLM request failed: {e}")
+        return None
+
+    except Exception as e:
+        print(f"VLM extraction error: {e}")
+        return None
+
+
+# ============================================================
+# Extract multiple business cards
+# ============================================================
+
+def extract_leads_batch(
+    images: List[Image.Image],
+    batch_size: int = 5
+) -> List[Optional[dict]]:
+
     results = []
+
     for image in images:
-        try:
-            result.extract_lead(image)
-        except Exception as e:
-            print(f"Qwen extraction failed: {e}")
-            result = None
+
+        result = extract_lead(image)
 
         results.append(result)
 
-    return results   
+    return results
