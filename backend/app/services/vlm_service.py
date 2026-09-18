@@ -1,6 +1,7 @@
 import os
 from io import BytesIO
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from PIL import Image
@@ -89,7 +90,7 @@ def extract_lead(image: Image.Image) -> Optional[dict]:
         response = requests.post(
             KAGGLE_VLM_URL,
             files=files,
-            timeout=180
+            timeout=300
         )
 
         print(f"Kaggle response status: {response.status_code}")
@@ -142,17 +143,9 @@ def extract_lead(image: Image.Image) -> Optional[dict]:
 # Extract multiple business cards
 # ============================================================
 
-def extract_leads_batch(
-    images: List[Image.Image],
-    batch_size: int = 5
-) -> List[Optional[dict]]:
+def extract_leads_batch(images,batch_size:2) :
 
-    results = []
-
-    for image in images:
-
-        result = extract_lead(image)
-
-        results.append(result)
+    with ThreadPoolExecutor(max_workers=batch_size) as executor:
+        results = list(executor.map(extract_lead,images))
 
     return results
