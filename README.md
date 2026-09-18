@@ -96,6 +96,8 @@ Users can export the extracted lead information into an Excel spreadsheet for fu
 
 The web application is publicly deployed and accessible through a web URL.
 
+https://vlm-based-business-card-lead-extracter-6ebe.onrender.com
+
 ---
 
 # 🖥️ Application Preview
